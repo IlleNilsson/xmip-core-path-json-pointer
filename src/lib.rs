@@ -8,7 +8,10 @@
 //! [`JsonRewrite`], a [`StructureWriter`] that produces a new Stream with one or
 //! more values replaced, as ADR-0013 asks of anything that changes content.
 //! Promote reads through the first two; demote writes through the first and
-//! third; route and process read.
+//! third; route and process read. The JSON document itself — parsed once,
+//! bridged to a scalar, written back as a Stream — is the capability's `json`,
+//! shared with the other JSON languages (ADR-0044); what is this technology's
+//! is the pointer.
 //!
 //! A pointer is RFC 6901: `/lines/0/qty`, with `~1` for `/` and `~0` for `~`.
 //! A value read is a scalar — null, boolean, number, string — and an object or
@@ -16,9 +19,9 @@
 //! property is one value, not a document.
 
 use contract::{
-    ContractDescriptor, ContractError, ContractId, StructureReader, StructureWriter,
-    StructuredValue,
+    ContractDescriptor, ContractError, StructureReader, StructureWriter, StructuredValue,
 };
+use path::json::{self, Document, Rewrite};
 use path::{Path, PathCost, PathEngine};
 use serde_json::Value;
 use stream::Stream;
@@ -57,24 +60,9 @@ impl PathEngine for JsonPointerEngine {
     }
 }
 
-fn descriptor() -> ContractDescriptor {
-    ContractDescriptor {
-        id: ContractId("json-schema".to_string()),
-        version: "1".to_string(),
-        representation: "application/json".to_string(),
-    }
-}
-
-fn parse(stream: &Stream) -> Result<Value, ContractError> {
-    serde_json::from_slice(stream.bytes()).map_err(|error| ContractError {
-        message: format!("not valid JSON: {error}"),
-    })
-}
-
 /// A JSON Stream, read by pointer.
 pub struct JsonStructure {
-    descriptor: ContractDescriptor,
-    value: Value,
+    document: Document,
 }
 
 impl JsonStructure {
@@ -84,30 +72,28 @@ impl JsonStructure {
     /// The Stream is not JSON.
     pub fn parse(stream: &Stream) -> Result<Self, ContractError> {
         Ok(Self {
-            descriptor: descriptor(),
-            value: parse(stream)?,
+            document: Document::parse(stream)?,
         })
     }
 }
 
 impl StructureReader for JsonStructure {
     fn contract(&self) -> &ContractDescriptor {
-        &self.descriptor
+        &self.document.descriptor
     }
 
     fn read(&self, path: &str) -> Result<Option<StructuredValue>, ContractError> {
-        self.value
+        self.document
+            .value
             .pointer(path)
-            .map(|found| scalar(found, path))
+            .map(|found| json::scalar(found, path))
             .transpose()
     }
 }
 
 /// A JSON Stream being rewritten into a new one.
 pub struct JsonRewrite {
-    descriptor: ContractDescriptor,
-    id: StreamId,
-    value: Value,
+    rewrite: Rewrite,
 }
 
 impl JsonRewrite {
@@ -117,95 +103,49 @@ impl JsonRewrite {
     /// The Stream is not JSON.
     pub fn of(stream: &Stream, id: StreamId) -> Result<Self, ContractError> {
         Ok(Self {
-            descriptor: descriptor(),
-            id,
-            value: parse(stream)?,
+            rewrite: Rewrite::of(stream, id)?,
         })
     }
 }
 
 impl StructureWriter for JsonRewrite {
     fn contract(&self) -> &ContractDescriptor {
-        &self.descriptor
+        &self.rewrite.descriptor
     }
 
     /// Replace the value at `path`, or add it when its parent is an object.
     /// A pointer into nothing is refused: demote names a place, it does not
     /// invent structure.
     fn write(&mut self, path: &str, value: StructuredValue) -> Result<(), ContractError> {
-        let replacement = json(value)?;
-        if let Some(existing) = self.value.pointer_mut(path) {
+        let replacement = json::from_scalar(value)?;
+        if let Some(existing) = self.rewrite.value.pointer_mut(path) {
             *existing = replacement;
             return Ok(());
         }
-        let (parent, key) = path.rsplit_once('/').ok_or_else(|| ContractError {
-            message: format!("{path:?} is not a JSON pointer"),
-        })?;
+        let (parent, key) = path
+            .rsplit_once('/')
+            .ok_or_else(|| ContractError::new(format!("{path:?} is not a JSON pointer")))?;
         let key = key.replace("~1", "/").replace("~0", "~");
-        match self.value.pointer_mut(parent) {
+        match self.rewrite.value.pointer_mut(parent) {
             Some(Value::Object(members)) => {
                 members.insert(key, replacement);
                 Ok(())
             }
-            _ => Err(ContractError {
-                message: format!("{path:?} has no object to write into"),
-            }),
+            _ => Err(ContractError::new(format!(
+                "{path:?} has no object to write into"
+            ))),
         }
     }
 
     fn finish(self: Box<Self>) -> Result<Stream, ContractError> {
-        let bytes = serde_json::to_vec(&self.value).map_err(|error| ContractError {
-            message: format!("cannot serialise JSON: {error}"),
-        })?;
-        Ok(Stream::new(
-            self.id,
-            bytes,
-            Some(self.descriptor.representation),
-        ))
+        self.rewrite.finish()
     }
-}
-
-fn scalar(value: &Value, path: &str) -> Result<StructuredValue, ContractError> {
-    Ok(match value {
-        Value::Null => StructuredValue::Null,
-        Value::Bool(flag) => StructuredValue::Bool(*flag),
-        Value::Number(number) => match number.as_i64() {
-            Some(integer) => StructuredValue::Integer(integer),
-            None => StructuredValue::Decimal(number.as_f64().unwrap_or(f64::NAN)),
-        },
-        Value::String(text) => StructuredValue::Text(text.clone()),
-        Value::Array(_) | Value::Object(_) => {
-            return Err(ContractError {
-                message: format!("{path} is not a scalar"),
-            });
-        }
-    })
-}
-
-fn json(value: StructuredValue) -> Result<Value, ContractError> {
-    Ok(match value {
-        StructuredValue::Null => Value::Null,
-        StructuredValue::Bool(flag) => Value::Bool(flag),
-        StructuredValue::Integer(integer) => Value::from(integer),
-        StructuredValue::Decimal(decimal) => {
-            serde_json::Number::from_f64(decimal).map_or(Value::Null, Value::Number)
-        }
-        StructuredValue::Text(text) => Value::String(text),
-        StructuredValue::Binary(_) => {
-            return Err(ContractError {
-                message: "binary has no JSON form here".to_string(),
-            });
-        }
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn stream(text: &str) -> Stream {
-        Stream::new(StreamId::new(1), text.as_bytes().to_vec(), None)
-    }
+    use path::fixture::stream;
 
     const ORDER: &str = r#"{"id":"A1","paid":false,"lines":[{"sku":"X","qty":2,"price":9.5}]}"#;
 
