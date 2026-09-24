@@ -18,11 +18,11 @@
 //! array at the pointer is refused rather than stringified, because a promoted
 //! property is one value, not a document.
 
-use contract::{
-    ContractDescriptor, ContractError, StructureReader, StructureWriter, StructuredValue,
-};
 use path::json::{self, Document, Rewrite};
 use path::{Path, PathCost, PathEngine};
+use sdk::contract::{
+    ContractDescriptor, ContractError, StructureReader, StructureWriter, StructuredValue,
+};
 use serde_json::Value;
 use stream::Stream;
 use xcore::StreamId;
