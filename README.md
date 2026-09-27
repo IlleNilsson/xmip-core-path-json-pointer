@@ -1,10 +1,11 @@
 # xmip-core-path-json-pointer
 
 The `json-pointer` path technology, a technology of
-[xmip-core-path](https://github.com/IlleNilsson/xmip-core-path). It carries the
-`PathEngine` for the language `json-pointer`, and the structure reader and writer that
-give the engine content to address. Promote reads through it, demote writes
-through it to produce a new Stream (ADR-0013), route and process read.
+[xmip-core-path](https://github.com/IlleNilsson/xmip-core-path). It carries
+`JsonPointerLanguage`, the `PathLanguage` for the language `json-pointer`: a
+pointer compiles once, and the JSON a Message carries is parsed once for every
+JSON path reading it. Promote reads through it, demote writes through it to
+produce a new Stream (ADR-0013), route and process read.
 
 ## Toolchain
 
