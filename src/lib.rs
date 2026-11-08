@@ -17,7 +17,7 @@
 //! pointer, or adds it when its parent is an object.
 
 use contract::ContractError;
-use path::{CompiledExpression, Content, PathLanguage, Rewriting, json};
+use path::{CompiledExpression, Content, Namespaces, PathLanguage, Rewriting, json};
 use serde_json::Value;
 use xcore::ScalarValue;
 
@@ -30,7 +30,12 @@ impl PathLanguage for JsonPointerLanguage {
     }
 
     /// A pointer is empty, for the whole document, or starts with `/`.
-    fn compile(&self, expression: &str) -> Result<Box<dyn CompiledExpression>, ContractError> {
+    fn compile(
+        &self,
+        expression: &str,
+        namespaces: &Namespaces,
+    ) -> Result<Box<dyn CompiledExpression>, ContractError> {
+        namespaces.unused_by(self.language())?;
         if !expression.is_empty() && !expression.starts_with('/') {
             return Err(ContractError::new(format!(
                 "{expression:?} is not a JSON pointer"
@@ -67,7 +72,9 @@ mod tests {
     const ORDER: &str = r#"{"id":"A1","paid":false,"lines":[{"sku":"X","qty":2,"price":9.5}]}"#;
 
     fn compiled(pointer: &str) -> Box<dyn CompiledExpression> {
-        JsonPointerLanguage.compile(pointer).expect("compiles")
+        JsonPointerLanguage
+            .compile(pointer, &Namespaces::new())
+            .expect("compiles")
     }
 
     #[test]
@@ -93,7 +100,11 @@ mod tests {
         );
         assert_eq!(read("/nowhere").expect("reads"), None);
         assert!(read("/lines").is_err());
-        assert!(JsonPointerLanguage.compile("id").is_err());
+        assert!(
+            JsonPointerLanguage
+                .compile("id", &Namespaces::new())
+                .is_err()
+        );
     }
 
     #[test]
